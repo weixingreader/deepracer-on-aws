@@ -53,6 +53,8 @@ export interface ApiProps {
 export class Api extends Construct {
   public readonly api: SpecRestApi;
   public readonly workflowJobQueue: Queue;
+
+  public readonly workflowJobDeadLetterQueue: Queue;
   public readonly assetPackagingDLQAlarm: Alarm;
   public readonly importModelJobQueue: Queue;
   public readonly importModelWorkflow: ImportWorkflow;
@@ -64,13 +66,31 @@ export class Api extends Construct {
 
     const { namespace } = props;
 
+    // 工作队列的死信队列：FIFO 队列的所有消息共用同一个 MessageGroupId，
+    // 队头消息若持续失败会堵塞整个队列（head-of-line blocking），且原先未配置
+    // redrive 策略，失败消息会在保留期内无限重试。此处限定重试次数，超限后移入
+    // 死信队列，保证后续任务能够继续被派发。
+    this.workflowJobDeadLetterQueue = new Queue(this, 'WorkflowJobDeadLetterQueue', {
+      encryption: QueueEncryption.KMS_MANAGED,
+      enforceSSL: true,
+      fifo: true,
+      removalPolicy: RemovalPolicy.DESTROY,
+      retentionPeriod: Duration.days(14),
+    });
+
     this.workflowJobQueue = new Queue(this, 'WorkflowJobQueue', {
       encryption: QueueEncryption.KMS_MANAGED,
       enforceSSL: true,
       fifo: true,
       removalPolicy: RemovalPolicy.DESTROY, // TODO: link to config value
       retentionPeriod: Duration.days(14),
-      visibilityTimeout: Duration.minutes(1),
+      // 需不小于消费者 Lambda 超时的 6 倍（JobDispatcher 为 2 分钟），
+      // 否则消息可能在处理中被重复投递，导致同一训练任务被重复派发。
+      visibilityTimeout: Duration.minutes(12),
+      deadLetterQueue: {
+        queue: this.workflowJobDeadLetterQueue,
+        maxReceiveCount: 10,
+      },
     });
 
     // Entry points for api lambda handlers in the lambda lib

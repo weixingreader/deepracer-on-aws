@@ -357,6 +357,10 @@ export class Workflow extends Construct {
         POWERTOOLS_METRICS_NAMESPACE: 'DeepRacerIndyWorkflow',
       },
       memorySize: 256,
+      // ListTrainingJobs 速率上限为 2 次/秒且不可调整，客户端启用了自适应重试
+      // （指数退避），单次调度耗时可能明显变长。默认 30 秒不足，需放宽超时，
+      // 否则 Lambda 超时会导致消息重投、造成同一训练任务被重复派发。
+      timeout: Duration.minutes(2),
       role: jobDispatcherRole,
     });
 
