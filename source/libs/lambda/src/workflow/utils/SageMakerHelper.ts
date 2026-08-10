@@ -24,6 +24,23 @@ import { TrainingInstanceQuotaCode } from '../constants/sageMaker.js';
 import { SimulationLaunchFile } from '../constants/simulation.js';
 import type { SageMakerHyperparameters } from '../types/sageMakerHyperparameters.js';
 
+/**
+ * 训练实例配额/用量的进程内缓存。
+ *
+ * 背景：JobDispatcher 每处理一条 SQS 消息都要查询配额与当前用量，其中
+ * ListTrainingJobs 的账号级速率上限为 2 次/秒且不可调整。突发调用一旦触发
+ * ThrottlingException，调度器就会失败并把消息退回 FIFO 队列；由于队列所有消息
+ * 共用同一个 MessageGroupId，队头消息反复失败会堵塞整个队列（head-of-line
+ * blocking）。缓存可显著降低调用频率，避免该死锁。
+ *
+ * Lambda 容器会被复用，因此模块级变量可在多次调用间保留。
+ */
+const QUOTA_CACHE_TTL_MS = 5 * 60 * 1000; // 配额极少变动，可长时间缓存
+const USAGE_CACHE_TTL_MS = 10 * 1000; // 用量变化快，仅做短时缓存
+
+let quotaCache: { value: number; expiresAt: number } | undefined;
+let usageCache: { value: number; expiresAt: number } | undefined;
+
 class SageMakerHelper {
   @logMethod
   async createTrainingJob({ jobItem, modelItem }: { jobItem: JobItem; modelItem: ModelItem }) {
@@ -220,6 +237,10 @@ class SageMakerHelper {
   }
 
   async getTrainingInstanceQuota() {
+    if (quotaCache && quotaCache.expiresAt > Date.now()) {
+      return quotaCache.value;
+    }
+
     const instanceQuota = await serviceQuotasHelper.getServiceQuota(
       'sagemaker',
       TrainingInstanceQuotaCode[deepRacerIndyAppConfig.sageMaker.instanceType],
@@ -229,10 +250,17 @@ class SageMakerHelper {
       `SageMaker ${deepRacerIndyAppConfig.sageMaker.instanceType} training instance quota is set to ${instanceQuota.Value}`,
     );
 
-    return instanceQuota.Value as number;
+    const value = instanceQuota.Value as number;
+    quotaCache = { value, expiresAt: Date.now() + QUOTA_CACHE_TTL_MS };
+
+    return value;
   }
 
   async getTrainingInstanceUsage() {
+    if (usageCache && usageCache.expiresAt > Date.now()) {
+      return usageCache.value;
+    }
+
     const TWENTY_FOUR_HOURS_10_MINS_IN_MILLIS = 24 * 60 * 60 * 1000 + 10 * 60 * 1000; // Longest job duration + 10 min buffer
 
     let instanceUsage = 0;
@@ -244,6 +272,8 @@ class SageMakerHelper {
           CreationTimeAfter: new Date(Date.now() - TWENTY_FOUR_HOURS_10_MINS_IN_MILLIS),
           NameContains: 'deepracerindy',
           StatusEquals: TrainingJobStatus.IN_PROGRESS,
+          // 显式使用最大页大小（默认仅 10），减少分页请求次数以规避速率限制
+          MaxResults: 100,
         },
       )) {
         instanceUsage += result.TrainingJobSummaries?.length ?? 0;
@@ -254,10 +284,13 @@ class SageMakerHelper {
           CreationTimeAfter: new Date(Date.now() - TWENTY_FOUR_HOURS_10_MINS_IN_MILLIS),
           NameContains: 'deepracerindy',
           StatusEquals: TrainingJobStatus.STOPPING,
+          MaxResults: 100,
         },
       )) {
         instanceUsage += result.TrainingJobSummaries?.length ?? 0;
       }
+
+      usageCache = { value: instanceUsage, expiresAt: Date.now() + USAGE_CACHE_TTL_MS };
 
       return instanceUsage;
     } catch (error) {
@@ -276,10 +309,18 @@ class SageMakerHelper {
 
     if (isCapacityAvailable) {
       logger.info(`Active SageMaker training instances [${instanceUsage}] is less than quota [${instanceQuota}]`);
+      // 判定有容量后，调用方即将派发一个任务。在缓存有效期内先行累加用量，
+      // 避免连续多次派发时因读到同一份陈旧用量而超出配额。
+      // 若派发最终失败，此处仅偏保守（少派发），不会造成超配额。
+      if (usageCache) {
+        usageCache.value += 1;
+      }
     } else {
       logger.warn(
         `Active SageMaker training instances [${instanceUsage}] is equal to or greater than quota [${instanceQuota}]`,
       );
+      // 已无容量时清除缓存，下次判定重新取真实用量，避免长时间误判为满载
+      usageCache = undefined;
     }
 
     return isCapacityAvailable;
