@@ -374,7 +374,20 @@ export class Api extends Construct {
             name,
             priority,
             overrideAction: { none: {} },
-            statement: { managedRuleGroupStatement: { vendorName: 'AWS', name } },
+            statement: {
+              managedRuleGroupStatement: {
+                vendorName: 'AWS',
+                name,
+                // CommonRuleSet 的 SizeRestrictions_BODY 默认限制请求体 8 KB，
+                // 会拦截携带较大奖励函数的正常 CreateModel 请求（用户看到 403 Forbidden）。
+                // 此处仅将该条规则降级为 count，规则组内其他规则（XSS 等）仍保持 block。
+                ...(name === 'AWSManagedRulesCommonRuleSet'
+                  ? {
+                      ruleActionOverrides: [{ name: 'SizeRestrictions_BODY', actionToUse: { count: {} } }],
+                    }
+                  : {}),
+              },
+            },
             visibilityConfig: {
               sampledRequestsEnabled: true,
               cloudWatchMetricsEnabled: true,
