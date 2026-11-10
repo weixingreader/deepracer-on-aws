@@ -12,5 +12,7 @@ const namespace = (typeof process !== 'undefined' && process.env?.NAMESPACE) || 
 export const userPoolDefaults = {
   userPoolName: `${namespace}-${BASE_USER_POOL_NAME}`,
   enableMFA: false,
-  enableSignups: true,
+  // 本部署关闭自助注册：仅允许管理员邀请、批量导入或现场注册角色创建账号。
+  // v1.3.0 起上游默认改为 true，且新用户额度为不限，开放注册会带来不可控的训练费用。
+  enableSignups: false,
 } as const satisfies DeepRacerIndyUserPoolConfig;

@@ -66,7 +66,8 @@ describe('UserIdentity', () => {
         AutoVerifiedAttributes: ['email'],
         AliasAttributes: ['email'],
         AdminCreateUserConfig: {
-          AllowAdminCreateUserOnly: false,
+          // 跟随配置项 enableSignups，避免与部署时的注册开关取值脱节
+          AllowAdminCreateUserOnly: !deepRacerIndyAppConfig.userPool.enableSignups,
         },
       }),
     ).not.toThrow();
